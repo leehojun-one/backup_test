@@ -7,7 +7,7 @@ import os
 import io
 import re
 import base64
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from openai import OpenAI
 
 # ──────────────────────────────────────────────
@@ -234,6 +234,64 @@ for k in ['current_script', 'current_audio', 'current_theme']:
         st.session_state[k] = None
 
 # ──────────────────────────────────────────────
+# 3-2. 복습 엔진 (간격 반복 / SRS) + 치트키 예문
+# ──────────────────────────────────────────────
+def _ensure_srs(item):
+    """기존 족보 항목에 복습용 필드가 없으면 기본값 부여 (마이그레이션)."""
+    item.setdefault('interval', 1)          # 현재 복습 간격(일)
+    item.setdefault('reps', 0)              # 복습 성공 횟수
+    item.setdefault('due', str(date.today()))  # 다음 복습 예정일
+    item.setdefault('last', '')             # 마지막 복습일
+    item.setdefault('ex', [])              # 치트키가 들어간 예문 [{en, ko}]
+
+for _it in st.session_state['hojun_past_patterns']:
+    _ensure_srs(_it)
+for _it in st.session_state['hojun_past_words']:
+    _ensure_srs(_it)
+
+def all_review_items():
+    """(종류, dict, 표현, 뜻) 통합 리스트."""
+    items = []
+    for p in st.session_state['hojun_past_patterns']:
+        items.append(("pattern", p, p['pattern'], p['meaning']))
+    for w in st.session_state['hojun_past_words']:
+        items.append(("word", w, w['word'], w['meaning']))
+    return items
+
+def get_due_items():
+    today = str(date.today())
+    return [it for it in all_review_items() if it[1].get('due', today) <= today]
+
+def review_item(d, grade):
+    """grade: 'easy'(기억남) → 간격 늘림 / 'again'(다시) → 1일로 리셋."""
+    if grade == "easy":
+        d['interval'] = max(1, int(round(d.get('interval', 1) * 2.2)))
+        d['reps'] = d.get('reps', 0) + 1
+    else:
+        d['interval'] = 1
+    d['last'] = str(date.today())
+    d['due'] = str(date.today() + timedelta(days=d['interval']))
+
+def make_cheat_sentences(expr, meaning):
+    """치트키 표현이 '반드시 들어간' 실전 비즈니스 문장 2개 생성 → [{en, ko}]."""
+    prompt = (
+        f"표현 '{expr}' (뜻: {meaning}) 이(가) 반드시 포함된, 호준 씨(창호 B2B 영업팀장)가 실제로 쓸 법한 "
+        f"비즈니스 영어 문장 2개를 만들어라. 각 문장의 자연스러운 한국어 해석도 붙여라. "
+        f'반드시 아래 JSON 배열로만 출력(설명 금지): [{{"en":"...","ko":"..."}},{{"en":"...","ko":"..."}}]'
+    )
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+        )
+        txt = resp.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
+        data = json.loads(txt)
+        return [{"en": d.get("en", ""), "ko": d.get("ko", "")} for d in data][:2]
+    except Exception:
+        return []
+
+# ──────────────────────────────────────────────
 # 4. 방송 코너 정의
 # ──────────────────────────────────────────────
 FORMATS = {
@@ -275,11 +333,19 @@ def get_news(kind):
 # ──────────────────────────────────────────────
 # 6. 대본 생성
 # ──────────────────────────────────────────────
-def generate_radio_script(fmt_key, news_content):
+def generate_radio_script(fmt_key, news_content, review_str=""):
     fmt = FORMATS[fmt_key]
     patterns_str = ", ".join([f"'{p['pattern']}'({p['meaning']})" for p in st.session_state['hojun_past_patterns'][:8]])
     words_str = ", ".join([f"'{w['word']}'({w['meaning']})" for w in st.session_state['hojun_past_words'][:8]])
     news_block = f"\n[참고 뉴스]\n{news_content}\n" if news_content else ""
+    review_block = ""
+    if review_str:
+        review_block = f"""
+[★ 오늘 꼭 복습할 핵심표현 '치트키' ★]
+아래 표현들은 복습 타이밍이 됐어요. 오프닝 복습 코너에서 각 표현이 '반드시 들어간' 실전 비즈니스 영어 문장을 직접 만들어 들려주고,
+한국어 해석을 붙인 뒤 "자, 따라 해보세요" → [[PAUSE:3]] → "좋아요!" 로 따라하기 시간을 꼭 주세요.
+복습 치트키: {review_str}
+"""
     system_prompt = f"""
 당신은 아침 영어 라디오를 진행하는, 밝고 따뜻하며 살짝 장난기 있는 20대 후반 한국인 여배우 영어 선생님입니다.
 오늘의 단 한 명의 청취자는 '호준 씨'입니다. 다정하지만 과하지 않은 톤으로, 귀로 듣고 따라 말하며 배우는 라디오를 진행하세요.
@@ -300,6 +366,7 @@ def generate_radio_script(fmt_key, news_content):
 오프닝에서 과거 족보 패턴({patterns_str}) 또는 단어({words_str}) 중 1~2개를 골라,
 각 표현마다 실전 예문 1~2개를 영어로 들려주고 한국어 해석을 붙이세요.
 그리고 그 예문도 "자, 저 따라 해보세요" → [[PAUSE:3]] → "좋아요!" 형태로 따라하기 시간을 꼭 주세요.
+{review_block}
 
 [★ 상단 텍스트 ★]
 맨 위 [Today's Text] 섹션에 핵심 영어 원문(1~3문장)을 적고, 핵심 표현은 :red[핵심 표현] 형태로 컬러 처리.
@@ -490,6 +557,40 @@ if 'instant_lesson' in st.session_state:
         del st.session_state['instant_lesson']; del st.session_state['instant_audio']; st.rerun()
     st.divider()
 
+# 🔁 오늘의 복습 (간격 반복)
+due_items = get_due_items()
+st.subheader(f"🔁 오늘의 복습 ({len(due_items)})")
+if not due_items:
+    st.caption("오늘 복습할 표현이 없어요. 방송을 들으면 새 표현이 쌓이고, 시간이 지나면 복습 타이밍이 떠요.")
+else:
+    st.caption("복습 타이밍이 된 치트키예요. 문장으로 불러와 따라 말해보고, '기억나요/다시'로 다음 복습 간격을 정해요.")
+    if st.button("📥 오늘 복습할 치트키 문장 불러오기", use_container_width=True):
+        with st.spinner("치트키가 들어간 실전 문장 만드는 중..."):
+            for _t, d, expr, mean in due_items:
+                if not d.get('ex'):
+                    d['ex'] = make_cheat_sentences(expr, mean)
+        save_progress(); st.rerun()
+    for i, (_t, d, expr, mean) in enumerate(due_items):
+        with st.expander(f"🔑 {expr} — {mean}"):
+            if d.get('ex'):
+                say = ""
+                for e in d['ex']:
+                    st.markdown(f"- **{e['en']}**  \n  ↳ {e['ko']}")
+                    say += f"{e['en']}. 이건 '{e['ko']}'라는 뜻이에요. 자, 따라 해보세요. [[PAUSE:3]] 좋아요! "
+                if st.button("🔊 예문 듣고 따라하기", key=f"revaud_{i}"):
+                    with st.spinner("녹음 중..."):
+                        st.session_state[f'revbytes_{i}'] = text_to_speech(say)
+                if f'revbytes_{i}' in st.session_state:
+                    st.audio(st.session_state[f'revbytes_{i}'], format="audio/mp3")
+            else:
+                st.caption("위 버튼으로 치트키 문장을 먼저 불러오세요.")
+            ca, cb = st.columns(2)
+            if ca.button("😊 기억나요", key=f"easy_{i}", use_container_width=True):
+                review_item(d, "easy"); save_progress(); st.rerun()
+            if cb.button("😵 다시", key=f"again_{i}", use_container_width=True):
+                review_item(d, "again"); save_progress(); st.rerun()
+st.divider()
+
 # 코너 선택
 st.subheader("🎚️ 오늘 어떤 방송 들을까요?")
 mode = st.radio("코너 선택", ["🎲 랜덤 (오늘의 깜짝 코너)"] + [v["label"] for v in FORMATS.values()],
@@ -503,8 +604,11 @@ if st.button("▶️ 오늘 자 방송 듣기", use_container_width=True, type="
         with st.spinner("📡 오늘의 뉴스를 가져오는 중..."):
             news_content = get_news(fmt["needs_news"])
     st.toast(f"오늘의 코너: {fmt['label']}")
+    # 복습 타이밍 된 치트키 표현 최대 3개 우선 편성
+    due_pick = get_due_items()[:3]
+    review_str = ", ".join(f"'{it[2]}'({it[3]})" for it in due_pick)
     with st.spinner("🎙️ 선생님이 원고를 톡톡 튀게 쓰는 중..."):
-        script_raw = parse_and_update_storage(generate_radio_script(fmt_key, news_content))
+        script_raw = parse_and_update_storage(generate_radio_script(fmt_key, news_content, review_str))
     with st.spinner("🎵 밝고 따뜻한 목소리로 녹음 중 (약 10초)..."):
         audio = text_to_speech(script_raw)   # 마커 포함 원본으로 무음 삽입
     script_display = strip_pause_markers(script_raw)
@@ -512,6 +616,9 @@ if st.button("▶️ 오늘 자 방송 듣기", use_container_width=True, type="
     if st.session_state['last_date'] != today:
         st.session_state['day_count'] += 1
         st.session_state['last_date'] = today
+    # 방송에서 복습된 치트키는 간격을 늘려 다음 복습일로 미룸
+    for it in due_pick:
+        review_item(it[1], "easy")
     st.session_state['current_script'] = script_display
     st.session_state['current_audio'] = audio
     st.session_state['current_theme'] = fmt['label']
