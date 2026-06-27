@@ -9,7 +9,7 @@ if hasattr(ssl, '_create_unverified_context'):
     ssl._create_default_https_context = ssl._create_unverified_context
 
 # 2. OpenAI API 초기화 (🔥 보안 업그레이드: 코드에서 키를 지우고 스트림릿 비밀 금고에서 가져옵니다!)
-client = OpenAI(api_key=st.secrets["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"])
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # ==========================================
 # 🗂️ 호준 님의 족보 데이터 및 방송 메모리 초기화
