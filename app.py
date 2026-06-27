@@ -8,8 +8,8 @@ from openai import OpenAI
 if hasattr(ssl, '_create_unverified_context'):
     ssl._create_default_https_context = ssl._create_unverified_context
 
-# 2. OpenAI API 초기화
-client = OpenAI(api_key="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")
+# 2. OpenAI API 초기화 (🔥 보안 업그레이드: 코드에서 키를 지우고 스트림릿 비밀 금고에서 가져옵니다!)
+client = OpenAI(api_key=st.secrets["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"])
 
 # ==========================================
 # 🗂️ 호준 님의 족보 데이터 및 방송 메모리 초기화
@@ -52,7 +52,6 @@ def generate_radio_script(news_content, past_patterns, past_words, selected_them
     patterns_str = ", ".join([f"'{p['pattern']}'({p['meaning']})" for p in past_patterns])
     words_str = ", ".join([f"'{w['word']}'({w['meaning']})" for w in past_words])
     
-    # 💡 영어 문장 직후 무조건 한글 뜻을 라디오 멘트로 읽어주도록 프롬프트를 대폭 강화했습니다!
     system_prompt = f"""
     당신은 아침 라디오 방송을 진행하는 통통 튀고, 활기차며, 비타민처럼 밝은 에너지를 가진 '20~30대 젊은 여배우 영어 선생님'입니다.
     오늘의 청취자는 오직 당신이 너무나 아끼는 '호준 씨' 한 명뿐입니다. 
@@ -64,7 +63,7 @@ def generate_radio_script(news_content, past_patterns, past_words, selected_them
     - 테마가 '유머/위트'일 경우: 유쾌하고 재치 있는 일상 에피소드를 다루세요.
 
     [★ 필수: 영어 예문 직후 한국어 해석/뜻풀이 연동 규칙 ★]
-    대본 전체를 통틀어 영어 문장이나 예문(과거 복습 문장, 본문 예문, 패턴 챌린지 문장 등)이 튀어나올 때는 **절대로 영어만 말하고 넘어가면 안 됩니다.**
+    대본 전체를 통틀어 영어 문장이나 예문이 튀어나올 때는 **절대로 영어만 말하고 넘어가면 안 됩니다.**
     운전 중인 호준 씨가 귀로 듣고 바로 직관적으로 이해할 수 있도록, 영어 문장을 말한 직후 **"이 문장은 한국어로 ~라는 뜻이에요!"** 또는 **"~라는 의미를 담고 있답니다"**라며 정확한 한국어 번역과 핵심 단어 뜻을 다정하게 이어서 읊어주세요.
 
     [★ 영어 원문 강제 표출 및 컬러링 규칙 ★]
@@ -77,7 +76,7 @@ def generate_radio_script(news_content, past_patterns, past_words, selected_them
     1. 📝 [Today's Text] : 오늘의 스페셜 영어 원문 표출 (핵심 표현 컬러 처리)
     2. ✨ 활력 폭발 오프닝 & 족보 실전 예문/뜻 복습 (최소 500자)
     3. 📰 본문 테마 융합 토크 & 핵심 문장/뜻풀이 해설 (최소 800자)
-    4. 📐 딕션의 비밀: 0.5초 영작 챌린지 (최소 500자) : 오늘 배운 표현용 마스터 패턴 1개와 응용 문장 2개를 주되, 문장마다 한글 뜻을 완벽하게 매칭하여 설명하세요.
+    4. 📐 딕션의 비밀: 0.5초 영작 챌린지 (최소 500자)
     5. 🗂️ 오늘의 노트 & 해피 클로징 (최소 400자) : 필수 단어 3개 정리.
 
     [★ 데이터 자동 추출 마커 ★]
@@ -120,7 +119,7 @@ def parse_and_update_storage(raw_script):
 
 def generate_instant_lesson(selected_item, item_type):
     system_prompt = """
-    당신은 상큼 발랄하고 에너지가 넘치는 '젊은 여배우 영어 senescence 선생님'입니다.
+    당신은 상큼 발랄하고 에너지가 넘치는 '젊은 여배우 영어 선생님'입니다.
     호준 씨가 요청한 표현에 대해 최고급 비즈니스 실전 예문 2개를 주고, 그 예문들의 한글 뜻과 미묘한 비즈니스 뉘앙스를 아주 톡톡 튀고 명쾌하게 설명해 주세요.
     """
     user_content = f"호준 씨가 요청한 {item_type}: [{selected_item}]에 대한 실시간 1분 원포인트 레슨을 만들어 주세요."
