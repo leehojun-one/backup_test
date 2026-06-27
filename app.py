@@ -4,7 +4,8 @@ import ssl
 import random
 import json
 import os
-from datetime import date
+import io
+from datetime import date, datetime
 from openai import OpenAI
 
 # ──────────────────────────────────────────────
@@ -15,21 +16,88 @@ if hasattr(ssl, '_create_unverified_context'):
 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-PROGRESS_FILE = "hojun_progress.json"   # 누적 족보/진도 영구 저장
+PROGRESS_FILE = "hojun_progress.json"
+LIB_DIR = "broadcasts"
+LIB_INDEX = os.path.join(LIB_DIR, "index.json")
 
-# 손예진 톤 연기 디렉션 (실존 인물 목소리 복제 X, '분위기'만 연출)
-VOICE_NAME = "coral"
+# 손예진 톤 연기 디렉션 (실존 인물 복제 X, '분위기'만 연출)
 VOICE_INSTRUCTIONS = (
     "You are a bright, warm Korean actress in her late 20s hosting a morning English "
-    "radio show — think the cozy, sincere, slightly playful warmth of a beloved Korean "
-    "drama lead. Speak with gentle energy, never shouting. English lines: clear, natural "
-    "American pronunciation, a touch slower so a driver can follow. Korean lines: tender, "
-    "lively, like talking to a close friend named 호준. When you say '따라 해보세요', pause "
-    "and slow down so the listener can repeat after you."
+    "radio show — the cozy, sincere, slightly playful warmth of a beloved Korean drama lead. "
+    "Speak with gentle energy, never shouting. English lines: clear, natural American "
+    "pronunciation, a touch slower so a driver can follow. Korean lines: tender and lively, "
+    "like talking to a close friend named 호준. When you say '따라 해보세요', pause and slow down."
 )
 
+# 추천 보이스 (발랄 여성 톤 우선)
+VOICE_OPTIONS = {
+    "nova":    "🌟 nova — 밝고 활기찬 (발랄 여배우)",
+    "coral":   "🍑 coral — 친근하고 살짝 달콤",
+    "shimmer": "✨ shimmer — 부드럽고 경쾌",
+    "sage":    "🌿 sage — 차분하고 지적",
+    "ballad":  "🎵 ballad — 감성 낭독",
+    "marin":   "🌊 marin — 맑고 고음질(신규)",
+    "fable":   "📖 fable — 영국 억양 이야기꾼",
+    "alloy":   "⚪ alloy — 중성적 만능",
+}
+
 # ──────────────────────────────────────────────
-# 1. 족보 / 진도 영구 저장 (호준님 CSV/JSON 선호 반영)
+# 1. 구글 드라이브 연동 (서버 대용 저장소)
+#    secrets에 gcp_service_account + DRIVE_FOLDER_ID 가 있으면 자동 활성화
+# ──────────────────────────────────────────────
+def get_drive():
+    if "gcp_service_account" not in st.secrets or not st.secrets.get("DRIVE_FOLDER_ID"):
+        return None
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        creds = service_account.Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]),
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
+    except Exception:
+        return None
+
+DRIVE = get_drive()
+DRIVE_FOLDER_ID = st.secrets.get("DRIVE_FOLDER_ID", "") if "DRIVE_FOLDER_ID" in st.secrets else ""
+
+def _drive_find(name):
+    """폴더 안에서 이름으로 파일 찾기 → file_id or None"""
+    q = f"name='{name}' and '{DRIVE_FOLDER_ID}' in parents and trashed=false"
+    res = DRIVE.files().list(q=q, fields="files(id,name)", pageSize=1).execute()
+    files = res.get("files", [])
+    return files[0]["id"] if files else None
+
+def drive_upload(name, data_bytes, mimetype):
+    from googleapiclient.http import MediaIoBaseUpload
+    media = MediaIoBaseUpload(io.BytesIO(data_bytes), mimetype=mimetype, resumable=False)
+    existing = _drive_find(name)
+    if existing:
+        DRIVE.files().update(fileId=existing, media_body=media).execute()
+        return existing
+    meta = {"name": name, "parents": [DRIVE_FOLDER_ID]}
+    f = DRIVE.files().create(body=meta, media_body=media, fields="id").execute()
+    return f["id"]
+
+def drive_download(file_id):
+    from googleapiclient.http import MediaIoBaseDownload
+    buf = io.BytesIO()
+    req = DRIVE.files().get_media(fileId=file_id)
+    dl = MediaIoBaseDownload(buf, req)
+    done = False
+    while not done:
+        _, done = dl.next_chunk()
+    return buf.getvalue()
+
+def drive_delete(file_id):
+    try:
+        DRIVE.files().delete(fileId=file_id).execute()
+    except Exception:
+        pass
+
+# ──────────────────────────────────────────────
+# 2. 진도/족보 영구 저장
 # ──────────────────────────────────────────────
 def load_progress():
     if os.path.exists(PROGRESS_FILE):
@@ -47,6 +115,7 @@ def save_progress():
         "day_count": st.session_state['day_count'],
         "last_date": st.session_state['last_date'],
         "total_learned": st.session_state['total_learned'],
+        "voice": st.session_state['voice'],
     }
     try:
         with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
@@ -54,7 +123,78 @@ def save_progress():
     except Exception:
         pass
 
-# 초기화
+# ── 보관함 (드라이브 우선, 없으면 로컬) ──
+def load_library():
+    if DRIVE:
+        try:
+            fid = _drive_find("index.json")
+            if fid:
+                return json.loads(drive_download(fid).decode("utf-8"))
+        except Exception:
+            pass
+        return []
+    if os.path.exists(LIB_INDEX):
+        try:
+            with open(LIB_INDEX, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+def _write_index(lib):
+    if DRIVE:
+        drive_upload("index.json", json.dumps(lib, ensure_ascii=False, indent=2).encode("utf-8"), "application/json")
+    else:
+        os.makedirs(LIB_DIR, exist_ok=True)
+        with open(LIB_INDEX, "w", encoding="utf-8") as f:
+            json.dump(lib, f, ensure_ascii=False, indent=2)
+
+def save_broadcast(script, audio_bytes, theme):
+    try:
+        bid = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = f"영라디오_{bid}.mp3"
+        entry = {"id": bid, "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                 "theme": theme, "script": script, "audio": fname}
+        if DRIVE:
+            entry["drive_file_id"] = drive_upload(fname, audio_bytes, "audio/mpeg")
+        else:
+            os.makedirs(LIB_DIR, exist_ok=True)
+            with open(os.path.join(LIB_DIR, fname), "wb") as f:
+                f.write(audio_bytes)
+        lib = load_library()
+        lib.insert(0, entry)
+        _write_index(lib)
+    except Exception as e:
+        st.warning(f"보관함 저장 중 문제: {e}")
+
+def read_broadcast_audio(entry):
+    if DRIVE and entry.get("drive_file_id"):
+        try:
+            return drive_download(entry["drive_file_id"])
+        except Exception:
+            return None
+    path = os.path.join(LIB_DIR, entry["audio"])
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            return f.read()
+    return None
+
+def delete_broadcast(entry):
+    try:
+        if DRIVE and entry.get("drive_file_id"):
+            drive_delete(entry["drive_file_id"])
+        else:
+            p = os.path.join(LIB_DIR, entry["audio"])
+            if os.path.exists(p):
+                os.remove(p)
+        lib = [b for b in load_library() if b["id"] != entry["id"]]
+        _write_index(lib)
+    except Exception:
+        pass
+
+# ──────────────────────────────────────────────
+# 3. 세션 초기화
+# ──────────────────────────────────────────────
 _saved = load_progress()
 if 'hojun_past_patterns' not in st.session_state:
     st.session_state['hojun_past_patterns'] = (_saved or {}).get("patterns", [
@@ -78,55 +218,32 @@ if 'last_date' not in st.session_state:
     st.session_state['last_date'] = (_saved or {}).get("last_date", "")
 if 'total_learned' not in st.session_state:
     st.session_state['total_learned'] = (_saved or {}).get("total_learned", 0)
-
+if 'voice' not in st.session_state:
+    st.session_state['voice'] = (_saved or {}).get("voice", "nova")
 for k in ['current_script', 'current_audio', 'current_theme']:
     if k not in st.session_state:
         st.session_state[k] = None
 
 # ──────────────────────────────────────────────
-# 2. 방송 코너(포맷) 정의 — 매일 다른 분위기로 다양화
+# 4. 방송 코너 정의
 # ──────────────────────────────────────────────
 FORMATS = {
-    "korea_news": {
-        "label": "🇰🇷 오늘의 국내 주요 뉴스 (영어로)",
-        "needs_news": "korea",
-        "brief": "오늘 한국의 주요 뉴스 하나를 골라, 그 내용을 쉬운 영어로 소개하고 핵심 표현을 가르쳐 주세요. "
-                 "정치적으로 민감한 사안은 중립적으로 사실만 짧게 다루고, 영어 표현 학습에 집중하세요.",
-    },
-    "global_news": {
-        "label": "🌍 글로벌 비즈니스 뉴스",
-        "needs_news": "global",
-        "brief": "오늘의 글로벌 경제/비즈니스 뉴스를 소재로, 비즈니스 현장에서 바로 쓰는 영어 표현을 가르쳐 주세요.",
-    },
-    "movie_quote": {
-        "label": "🎬 영화 · 드라마 명대사",
-        "needs_news": None,
-        "brief": "널리 알려진 영화나 드라마의 명대사 한 줄을 골라(짧은 인용만), 그 장면의 맥락과 함께 영어 표현·뉘앙스를 "
-                 "가르쳐 주세요. 호준 씨가 일상이나 영업 현장에서 응용할 수 있는 변형 예문도 곁들이세요.",
-    },
-    "wisdom_quote": {
-        "label": "📜 명언 · 삶의 지혜 · 유명 글귀",
-        "needs_news": None,
-        "brief": "역사적 인물이나 고전의 유명한 명언/글귀 하나를 영어 원문으로 소개하고(짧은 인용), 그 안에 담긴 삶의 지혜를 "
-                 "따뜻하게 풀어주세요. 명언 속 핵심 표현을 실전 영어로 응용하는 법까지 알려주세요.",
-    },
-    "trivia": {
-        "label": "🧠 알아두면 똑똑해지는 교양 · 상식",
-        "needs_news": None,
-        "brief": "역사·과학·경제·세계문화 중 하나에서 '오 신기하다' 싶은 흥미로운 상식 하나를 골라 영어로 설명하고, "
-                 "그 주제를 말할 때 쓰는 영어 표현을 가르쳐 주세요.",
-    },
-    "biz_roleplay": {
-        "label": "💼 창호 영업 실전 비즈니스 영어 (호준님 맞춤)",
-        "needs_news": None,
-        "brief": "호준 씨는 KCC글라스 홈씨씨에서 아파트 리모델링용 창호(windows)를 인테리어 업체에 공급하는 B2B 영업팀장입니다. "
-                 "해외 바이어 상담, 견적 제시, 단가 협상, 납기/시공 일정 조율 같은 '실제 영업 상황'을 짧은 롤플레이 대화로 보여주고, "
-                 "거기서 바로 쓰는 비즈니스 영어 표현을 가르쳐 주세요.",
-    },
+    "korea_news": {"label": "🇰🇷 오늘의 국내 주요 뉴스 (영어로)", "needs_news": "korea",
+        "brief": "오늘 한국의 주요 뉴스 하나를 골라 쉬운 영어로 소개하고 핵심 표현을 가르쳐 주세요. 정치적으로 민감한 사안은 중립적으로 사실만 짧게 다루세요."},
+    "global_news": {"label": "🌍 글로벌 비즈니스 뉴스", "needs_news": "global",
+        "brief": "오늘의 글로벌 경제/비즈니스 뉴스를 소재로, 현장에서 바로 쓰는 비즈니스 영어 표현을 가르쳐 주세요."},
+    "movie_quote": {"label": "🎬 영화 · 드라마 명대사", "needs_news": None,
+        "brief": "널리 알려진 영화/드라마 명대사 한 줄(짧은 인용만)을 골라 장면 맥락과 함께 영어 표현·뉘앙스를 가르치고, 호준 씨가 응용할 변형 예문도 곁들이세요."},
+    "wisdom_quote": {"label": "📜 명언 · 삶의 지혜 · 유명 글귀", "needs_news": None,
+        "brief": "역사적 인물/고전의 유명 명언 하나를 영어 원문으로 소개하고(짧은 인용), 담긴 삶의 지혜를 따뜻하게 풀어주세요. 핵심 표현을 실전 영어로 응용까지."},
+    "trivia": {"label": "🧠 알아두면 똑똑해지는 교양 · 상식", "needs_news": None,
+        "brief": "역사·과학·경제·세계문화 중 '오 신기하다' 싶은 상식 하나를 영어로 설명하고, 그 주제를 말할 때 쓰는 영어 표현을 가르쳐 주세요."},
+    "biz_roleplay": {"label": "💼 창호 영업 실전 비즈니스 영어 (호준님 맞춤)", "needs_news": None,
+        "brief": "호준 씨는 KCC글라스 홈씨씨에서 아파트 리모델링용 창호(windows)를 인테리어 업체에 공급하는 B2B 영업팀장입니다. 해외 바이어 상담·견적·단가 협상·납기 조율 같은 실제 상황을 짧은 롤플레이로 보여주고 비즈니스 영어를 가르쳐 주세요."},
 }
 
 # ──────────────────────────────────────────────
-# 3. 뉴스 수집 (국내 / 글로벌)
+# 5. 뉴스 수집
 # ──────────────────────────────────────────────
 def fetch_rss_title(urls):
     for url in urls:
@@ -134,81 +251,65 @@ def fetch_rss_title(urls):
             feed = feedparser.parse(url)
             if feed.entries:
                 e = random.choice(feed.entries[:6])
-                summary = getattr(e, "summary", "")
-                return f"{e.title} - {summary}"[:600]
+                return f"{e.title} - {getattr(e, 'summary', '')}"[:600]
         except Exception:
             continue
     return None
 
 def get_news(kind):
     if kind == "korea":
-        urls = [
-            "https://www.yna.co.kr/rss/news.xml",          # 연합뉴스
-            "https://www.hani.co.kr/rss/",                 # 한겨레
-            "https://rss.donga.com/total.xml",             # 동아일보
-        ]
+        urls = ["https://www.yna.co.kr/rss/news.xml", "https://www.hani.co.kr/rss/", "https://rss.donga.com/total.xml"]
         return fetch_rss_title(urls) or "오늘 한국에서는 경제·생활 분야의 다양한 소식이 전해지고 있습니다."
-    else:
-        urls = [
-            "http://feeds.bbci.co.uk/news/business/rss.xml",
-            "https://feeds.bbci.co.uk/news/world/rss.xml",
-        ]
-        return fetch_rss_title(urls) or "Global markets are showing notable shifts ahead of the economic forum."
+    urls = ["http://feeds.bbci.co.uk/news/business/rss.xml", "https://feeds.bbci.co.uk/news/world/rss.xml"]
+    return fetch_rss_title(urls) or "Global markets are showing notable shifts ahead of the economic forum."
 
 # ──────────────────────────────────────────────
-# 4. 라디오 대본 생성
+# 6. 대본 생성
 # ──────────────────────────────────────────────
 def generate_radio_script(fmt_key, news_content):
     fmt = FORMATS[fmt_key]
     patterns_str = ", ".join([f"'{p['pattern']}'({p['meaning']})" for p in st.session_state['hojun_past_patterns'][:8]])
     words_str = ", ".join([f"'{w['word']}'({w['meaning']})" for w in st.session_state['hojun_past_words'][:8]])
     news_block = f"\n[참고 뉴스]\n{news_content}\n" if news_content else ""
-
     system_prompt = f"""
 당신은 아침 영어 라디오를 진행하는, 밝고 따뜻하며 살짝 장난기 있는 20대 후반 한국인 여배우 영어 선생님입니다.
-오늘의 단 한 명의 청취자는 운전 중인 '호준 씨'입니다. 다정하지만 과하지 않게, 운전에 방해되지 않는 톤으로 진행하세요.
+오늘의 단 한 명의 청취자는 운전 중인 '호준 씨'입니다. 운전에 방해되지 않게 다정하지만 과하지 않은 톤으로 진행하세요.
 
 [★ 오늘의 코너: {fmt['label']} ★]
 {fmt['brief']}
 
 [★ 운전자용 필수 규칙 — 영어 직후 한국어 해석 ★]
-영어 문장이 나올 때는 절대 영어만 말하고 넘어가지 마세요. 운전 중인 호준 씨가 귀로만 듣고 바로 이해하도록,
-영어 문장 직후 "이건 ~라는 뜻이에요" 하고 정확한 한국어 해석과 핵심 단어 뜻을 다정하게 바로 이어 붙이세요.
+영어 문장 직후 "이건 ~라는 뜻이에요" 하고 정확한 한국어 해석과 핵심 단어 뜻을 다정하게 바로 이어 붙이세요. 절대 영어만 말하고 넘어가지 마세요.
 
-[★ 쉐도잉(따라 말하기) 구간 — 운전 중 핵심 학습 ★]
-본문 중 가장 중요한 표현 1~2개는 "자, 저 따라 천천히 해볼게요" 하고 또박또박 천천히 읽은 뒤,
-"이제 호준 씨 차례예요, 따라 해보세요... (잠시) ... 좋아요, 한 번 더!" 식으로 반복 연습 구간을 꼭 넣으세요.
+[★ 쉐도잉 구간 ★]
+가장 중요한 표현 1~2개는 "자, 저 따라 천천히 해볼게요" 하고 또박또박 읽은 뒤 "이제 호준 씨 차례예요, 따라 해보세요... 좋아요, 한 번 더!" 식으로 반복 연습 구간을 넣으세요.
 
-[★ 상단 텍스트 표출 ★]
-대본 맨 위에 [Today's Text] 섹션을 두고 오늘의 핵심 영어 원문(1~3문장)을 적되, 핵심 표현은 반드시 :red[핵심 표현] 형태로 컬러 처리하세요.
+[★ 상단 텍스트 ★]
+맨 위 [Today's Text] 섹션에 핵심 영어 원문(1~3문장)을 적고, 핵심 표현은 :red[핵심 표현] 형태로 컬러 처리.
 
 [★ 누적 족보 연동 ★]
-오프닝이나 토크 중 호준 씨의 과거 족보 패턴({patterns_str}) 또는 단어({words_str}) 중 1~2개를 자연스럽게 소환하고,
-그 표현이 들어간 실전 예문 1개와 한국어 해석을 함께 들려주세요.
+과거 족보 패턴({patterns_str}) 또는 단어({words_str}) 중 1~2개를 자연스럽게 소환해 실전 예문 1개와 한국어 해석을 들려주세요.
 
 [대본 구성]
-1. 📝 [Today's Text] : 오늘의 핵심 영어 원문 (핵심 표현 컬러)
-2. ✨ 활기찬 오프닝 + 족보 복습 실전 예문/뜻
-3. 🎯 오늘의 코너 본문 (위 코너 지침대로) + 쉐도잉 구간
-4. 📐 0.5초 영작 챌린지 (호준 씨에게 한국어 문장 주고 영작 유도 → 정답/해석)
-5. 🗂️ 오늘의 노트 & 해피 클로징 : 오늘 배운 핵심 단어 3개 정리
+1. 📝 [Today's Text] (핵심 표현 컬러)
+2. ✨ 활기찬 오프닝 + 족보 복습
+3. 🎯 코너 본문 + 쉐도잉
+4. 📐 0.5초 영작 챌린지 (한국어 문장 주고 영작 유도 → 정답/해석)
+5. 🗂️ 오늘의 노트 & 클로징 (핵심 단어 3개 정리)
 
-전체 대본은 자연스러운 라디오 멘트체로, 너무 길지 않게(약 1800자 내외). 운전 중 한 번에 듣기 좋은 분량으로.
+전체 약 1800자 내외, 자연스러운 라디오 멘트체.
 
-[★ 데이터 추출 마커 — 반드시 맨 마지막 줄에 ★]
-대본이 끝난 뒤 정확히 아래 서식을 추가하세요.
+[★ 데이터 추출 마커 — 반드시 맨 마지막 줄 ★]
 |||EXTRACT|||
-NEW_PATTERN: 오늘배운패턴구조 | 패턴뜻
-NEW_WORD1: 새단어1 | 뜻1
-NEW_WORD2: 새단어2 | 뜻2
-NEW_WORD3: 새단어3 | 뜻3
+NEW_PATTERN: 패턴구조 | 뜻
+NEW_WORD1: 단어1 | 뜻1
+NEW_WORD2: 단어2 | 뜻2
+NEW_WORD3: 단어3 | 뜻3
 """
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"오늘 방송 대본을 만들어 주세요.{news_block}"},
-        ],
+        messages=[{"role": "system", "content": system_prompt},
+                  {"role": "user", "content": f"오늘 방송 대본을 만들어 주세요.{news_block}"}],
         temperature=0.85,
     )
     return response.choices[0].message.content
@@ -217,8 +318,7 @@ def parse_and_update_storage(raw_script):
     if "|||EXTRACT|||" not in raw_script:
         return raw_script
     parts = raw_script.split("|||EXTRACT|||")
-    clean_script = parts[0].strip()
-    data_part = parts[1].strip()
+    clean_script, data_part = parts[0].strip(), parts[1].strip()
     added = 0
     for line in data_part.split("\n"):
         if line.startswith("NEW_PATTERN:"):
@@ -243,56 +343,51 @@ def parse_and_update_storage(raw_script):
 
 def generate_instant_lesson(selected_item, item_type):
     system_prompt = (
-        "당신은 밝고 따뜻한 20대 후반 한국인 여배우 영어 선생님입니다. "
-        "호준 씨가 고른 표현에 대해 비즈니스 실전 예문 2개를 주고, 각 예문의 한국어 뜻과 미묘한 뉘앙스를 "
-        "톡톡 튀고 명쾌하게 설명하세요. 영어 문장 뒤에는 반드시 한국어 해석을 바로 붙이세요(운전 중 청취)."
+        "당신은 밝고 따뜻한 20대 후반 한국인 여배우 영어 선생님입니다. 호준 씨가 고른 표현에 대해 "
+        "비즈니스 실전 예문 2개를 주고, 각 예문의 한국어 뜻과 미묘한 뉘앙스를 톡톡 튀게 설명하세요. "
+        "영어 문장 뒤에는 반드시 한국어 해석을 바로 붙이세요(운전 중 청취)."
     )
-    user_content = f"호준 씨가 고른 {item_type}: [{selected_item}] 에 대한 1분 원포인트 레슨을 만들어 주세요."
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}],
+        messages=[{"role": "system", "content": system_prompt},
+                  {"role": "user", "content": f"호준 씨가 고른 {item_type}: [{selected_item}] 에 대한 1분 원포인트 레슨을 만들어 주세요."}],
         temperature=0.7,
     )
     return response.choices[0].message.content
 
 # ──────────────────────────────────────────────
-# 5. TTS — 손예진 톤 디렉션 + 긴 대본 청크 분할
+# 7. TTS (보이스 선택 + 청크 분할)
 # ──────────────────────────────────────────────
 def _chunk_text(text, limit=1600):
     chunks, cur = [], ""
     for line in text.split("\n"):
         if len(cur) + len(line) + 1 > limit and cur:
-            chunks.append(cur)
-            cur = ""
+            chunks.append(cur); cur = ""
         cur += line + "\n"
     if cur.strip():
         chunks.append(cur)
     return chunks
 
-def text_to_speech(text):
+def text_to_speech(text, voice=None):
+    voice = voice or st.session_state['voice']
     audio = b""
     for chunk in _chunk_text(text):
         if not chunk.strip():
             continue
         try:
-            resp = client.audio.speech.create(
-                model="gpt-4o-mini-tts",
-                voice=VOICE_NAME,
-                input=chunk,
-                instructions=VOICE_INSTRUCTIONS,
-            )
+            resp = client.audio.speech.create(model="gpt-4o-mini-tts", voice=voice,
+                                               input=chunk, instructions=VOICE_INSTRUCTIONS)
         except Exception:
-            # 환경에서 gpt-4o-mini-tts 미지원 시 안전 폴백
             resp = client.audio.speech.create(model="tts-1", voice="nova", input=chunk)
         audio += resp.content
     return audio
 
 # ──────────────────────────────────────────────
-# 6. UI
+# 8. UI
 # ──────────────────────────────────────────────
 st.set_page_config(page_title="여배우의 영라디오", page_icon="📻")
 st.title("📻 여배우의 영라디오")
-st.caption("🎙️ AI 음성으로 진행되는 1:1 맞춤 영어 라디오 · 운전하며 듣는 데일리 영어")
+st.caption("🎙️ AI 음성 1:1 맞춤 영어 라디오 · 운전하며 듣는 데일리 영어" + ("  ·  ☁️ 구글 드라이브 연결됨" if DRIVE else ""))
 
 c1, c2, c3 = st.columns(3)
 c1.metric("📅 함께한 날", f"Day {st.session_state['day_count']}")
@@ -300,14 +395,33 @@ c2.metric("🗂️ 누적 족보", f"{len(st.session_state['hojun_past_patterns'
 c3.metric("✨ 배운 표현", f"{st.session_state['total_learned']}개")
 st.divider()
 
-# 사이드바 — 족보
+# 사이드바: 목소리 고르기 + 족보
 with st.sidebar:
-    st.header("🗂️ 호준 님의 영어 족보")
+    st.header("🎙️ 목소리 고르기")
+    vkeys = list(VOICE_OPTIONS.keys())
+    sel = st.selectbox("선생님 목소리", vkeys,
+                       index=vkeys.index(st.session_state['voice']) if st.session_state['voice'] in vkeys else 0,
+                       format_func=lambda k: VOICE_OPTIONS[k])
+    if sel != st.session_state['voice']:
+        st.session_state['voice'] = sel
+        save_progress()
+    if st.button("🔊 이 목소리 미리듣기", use_container_width=True):
+        with st.spinner("샘플 굽는 중..."):
+            sample = ("안녕하세요 호준 씨! 오늘도 활기차게 시작해볼까요? "
+                      "Let's get started! 이건 '자, 시작해봐요'라는 뜻이에요. "
+                      "함께라면 영어, 정말 쉬워질 거예요!")
+            st.session_state['voice_sample'] = text_to_speech(sample, voice=sel)
+    if 'voice_sample' in st.session_state:
+        st.audio(st.session_state['voice_sample'], format="audio/mp3")
+    st.caption("💡 더 많은 목소리는 openai.fm 에서도 들어볼 수 있어요.")
+    st.divider()
+
+    st.header("🗂️ 영어 족보")
     st.caption("표현을 누르면 즉석 오디오 레슨이 시작돼요.")
-    st.subheader("📝 누적 핵심 패턴")
+    st.subheader("📝 핵심 패턴")
     for p in st.session_state['hojun_past_patterns']:
         if st.button(f"🔗 {p['pattern']} ({p['meaning']})", key=f"pat_{p['pattern']}", use_container_width=True):
-            with st.spinner("🎙️ 원포인트 오디오 굽는 중..."):
+            with st.spinner("🎙️ 원포인트 굽는 중..."):
                 lesson = generate_instant_lesson(f"{p['pattern']} ({p['meaning']})", "비즈니스 핵심 패턴")
                 st.session_state['instant_lesson'] = lesson
                 st.session_state['lesson_title'] = p['pattern']
@@ -315,21 +429,19 @@ with st.sidebar:
     st.subheader("📚 단어장")
     for w in st.session_state['hojun_past_words']:
         if st.button(f"🗂️ {w['word']} : {w['meaning']}", key=f"wrd_{w['word']}", use_container_width=True):
-            with st.spinner("🎙️ 원포인트 오디오 굽는 중..."):
+            with st.spinner("🎙️ 원포인트 굽는 중..."):
                 lesson = generate_instant_lesson(f"{w['word']} ({w['meaning']})", "필수 비즈니스 단어")
                 st.session_state['instant_lesson'] = lesson
                 st.session_state['lesson_title'] = w['word']
                 st.session_state['instant_audio'] = text_to_speech(lesson)
 
-# 즉석 레슨 출력
+# 즉석 레슨
 if 'instant_lesson' in st.session_state:
     st.success(f"🎯 원포인트 레슨: [{st.session_state['lesson_title']}]")
     st.audio(st.session_state['instant_audio'], format="audio/mp3")
     st.info(st.session_state['instant_lesson'])
     if st.button("❌ 레슨 창 닫기"):
-        del st.session_state['instant_lesson']
-        del st.session_state['instant_audio']
-        st.rerun()
+        del st.session_state['instant_lesson']; del st.session_state['instant_audio']; st.rerun()
     st.divider()
 
 # 코너 선택
@@ -338,43 +450,66 @@ mode = st.radio("코너 선택", ["🎲 랜덤 (오늘의 깜짝 코너)"] + [v[
                 label_visibility="collapsed")
 
 if st.button("▶️ 오늘 자 방송 듣기", use_container_width=True, type="primary"):
-    if mode.startswith("🎲"):
-        fmt_key = random.choice(list(FORMATS.keys()))
-    else:
-        fmt_key = next(k for k, v in FORMATS.items() if v["label"] == mode)
+    fmt_key = random.choice(list(FORMATS.keys())) if mode.startswith("🎲") else next(k for k, v in FORMATS.items() if v["label"] == mode)
     fmt = FORMATS[fmt_key]
-
     news_content = None
     if fmt["needs_news"]:
         with st.spinner("📡 오늘의 뉴스를 가져오는 중..."):
             news_content = get_news(fmt["needs_news"])
-
     st.toast(f"오늘의 코너: {fmt['label']}")
     with st.spinner("🎙️ 선생님이 원고를 톡톡 튀게 쓰는 중..."):
-        raw = generate_radio_script(fmt_key, news_content)
-        script = parse_and_update_storage(raw)
+        script = parse_and_update_storage(generate_radio_script(fmt_key, news_content))
     with st.spinner("🎵 밝고 따뜻한 목소리로 녹음 중 (약 10초)..."):
         audio = text_to_speech(script)
-
-    # 진도 갱신 (하루 1회 카운트)
     today = str(date.today())
     if st.session_state['last_date'] != today:
         st.session_state['day_count'] += 1
         st.session_state['last_date'] = today
-
     st.session_state['current_script'] = script
     st.session_state['current_audio'] = audio
     st.session_state['current_theme'] = fmt['label']
+    save_broadcast(script, audio, fmt['label'])
     save_progress()
     st.rerun()
 
-# 출력부
+# 현재 방송
 if st.session_state['current_script']:
     st.success(f"✨ 방송 준비 완료 — {st.session_state['current_theme']}")
     st.markdown("### 🎧 오디오 스트리밍")
     st.audio(st.session_state['current_audio'], format="audio/mp3")
-    st.caption("ℹ️ 본 음성은 AI로 생성된 합성 음성입니다.")
+    st.download_button("⬇️ 이 방송 폰에 저장 (mp3)", data=st.session_state['current_audio'],
+                       file_name=f"영라디오_{datetime.now().strftime('%m%d_%H%M')}.mp3",
+                       mime="audio/mp3", use_container_width=True)
+    st.caption("ℹ️ AI 합성 음성입니다." + ("  ·  ☁️ 구글 드라이브 보관함에 자동 저장됐어요." if DRIVE else "  ·  보관함에 자동 저장됐어요."))
     st.markdown("---")
     st.markdown(st.session_state['current_script'])
 else:
     st.write("버튼을 누르면 비타민처럼 활기찬 여배우의 영어 라디오가 시작됩니다 🎶")
+
+# 보관함
+st.divider()
+library = load_library()
+st.subheader(f"📼 보관함 ({len(library)})" + ("  ☁️" if DRIVE else ""))
+if not library:
+    st.caption("아직 저장된 방송이 없어요. 방송을 들으면 여기에 쌓입니다.")
+else:
+    labels = [f"{b['date']} · {b['theme']}" for b in library]
+    idx = st.selectbox("다시 들을 방송", range(len(library)), format_func=lambda i: labels[i], label_visibility="collapsed")
+    chosen = library[idx]
+    audio_bytes = read_broadcast_audio(chosen)
+    if audio_bytes:
+        st.audio(audio_bytes, format="audio/mp3")
+        a, b = st.columns(2)
+        a.download_button("⬇️ 폰에 저장", data=audio_bytes, file_name=chosen["audio"],
+                          mime="audio/mp3", use_container_width=True, key=f"dl_{chosen['id']}")
+        if b.button("🗑️ 삭제", use_container_width=True, key=f"del_{chosen['id']}"):
+            delete_broadcast(chosen); st.rerun()
+        with st.expander("📄 대본 보기"):
+            st.markdown(chosen["script"])
+    else:
+        st.warning("오디오를 찾지 못했어요.")
+        if st.button("🗑️ 목록에서 제거", key=f"delm_{chosen['id']}"):
+            delete_broadcast(chosen); st.rerun()
+
+if DRIVE:
+    st.caption("📱 폰에서 바로 듣기: 구글 드라이브 앱 → '영라디오' 폴더 → mp3 파일 탭하면 재생돼요.")
