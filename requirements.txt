@@ -1,3 +1,5 @@
-streamlit
-openai
+streamlit>=1.40
+openai>=1.40
 feedparser
+google-api-python-client
+google-auth
