@@ -358,6 +358,10 @@ FORMATS = {
         "brief": "역사·과학·경제·세계문화 중 '오 신기하다' 싶은 상식 하나를 영어로 설명하고, 그 주제를 말할 때 쓰는 영어 표현을 가르쳐 주세요."},
     "biz_roleplay": {"label": "💼 창호 영업 실전 비즈니스 영어 (호준님 맞춤)", "needs_news": None,
         "brief": "호준 씨는 KCC글라스 홈씨씨에서 아파트 리모델링용 창호(windows)를 인테리어 업체에 공급하는 B2B 영업팀장입니다. 해외 바이어 상담·견적·단가 협상·납기 조율 같은 실제 상황을 짧은 롤플레이로 보여주고 비즈니스 영어를 가르쳐 주세요."},
+    "daily_life": {"label": "🗣️ 일상생활 영어", "needs_news": None,
+        "brief": "카페 주문, 장보기·쇼핑, 이웃·친구와의 가벼운 대화, 약속 잡기 등 매일의 일상에서 자주 쓰는 생활 영어 표현을 짧은 상황 대화로 보여주고 가르쳐 주세요. 너무 어렵지 않게, 바로 따라 쓸 수 있는 표현 위주로."},
+    "travel": {"label": "✈️ 해외여행 영어", "needs_news": None,
+        "brief": "공항 입국심사, 호텔 체크인, 식당 주문, 길 묻기, 택시·교통, 쇼핑 등 해외여행 중 실제로 마주치는 상황의 영어 표현을 짧은 대화로 보여주고 가르쳐 주세요. 호준 씨는 여행을 좋아하니(일본 오타루 등), 설레는 여행 분위기로 다정하게."},
 }
 
 # ──────────────────────────────────────────────
@@ -384,7 +388,7 @@ def get_news(kind):
 # ──────────────────────────────────────────────
 # 6. 대본 생성
 # ──────────────────────────────────────────────
-def generate_radio_script(fmt_key, news_content, review_str="", yesterday_str="", compact=False):
+def generate_radio_script(fmt_key, news_content, review_str="", yesterday_str=""):
     fmt = FORMATS[fmt_key]
     patterns_str = ", ".join([f"'{p['pattern']}'({p['meaning']})" for p in st.session_state['hojun_past_patterns'][:8]])
     words_str = ", ".join([f"'{w['word']}'({w['meaning']})" for w in st.session_state['hojun_past_words'][:8]])
@@ -404,8 +408,7 @@ def generate_radio_script(fmt_key, news_content, review_str="", yesterday_str=""
 방송을 시작하면 가장 먼저, 어제 배운 표현들을 60초 안에 빠르게 짚어주세요. 각 표현의 예문 1개와 한국어 해석을 들려주고 짧게 따라하기를 시키세요.
 어제 배운 표현: {yesterday_str}
 """
-    length_rule = ("전체 약 700~900자로 아주 짧게(핵심 표현 2~3개만). 군더더기 없이 압축." if compact
-                   else "전체 약 1800자 내외, 자연스러운 라디오 멘트체.")
+    length_rule = "전체 약 1800자 내외, 자연스러운 라디오 멘트체."
     system_prompt = f"""
 당신은 아침 영어 라디오를 진행하는, 밝고 따뜻하며 살짝 장난기 있는 20대 후반 한국인 여배우 영어 선생님입니다.
 오늘의 단 한 명의 청취자는 '호준 씨'입니다. 다정하지만 과하지 않은 톤으로, 귀로 듣고 따라 말하며 배우는 라디오를 진행하세요.
@@ -426,6 +429,12 @@ def generate_radio_script(fmt_key, news_content, review_str="", yesterday_str=""
 [★ 지난 족보 복습 — 예문 + 따라하기 ★]
 오프닝에서 과거 족보 패턴({patterns_str}) 또는 단어({words_str}) 중 1~2개를 골라, 각 표현마다 실전 예문 1~2개를 영어로 들려주고 한국어 해석을 붙인 뒤, 위 끊어 읽기 방식으로 따라하기를 시키세요.
 {review_block}
+[★ 오늘의 문법 한 입 (One-point Grammar) ★]
+오늘 다룬 표현이나 예문 중 하나에서 핵심 문법 포인트 1개를 골라, 운전 중에도 귀로 이해되게 아주 쉽고 짧게 설명하세요.
+- 어려운 문법 용어는 최소화하고, "왜 이렇게 쓰는지"를 일상 비유로 풀어주세요.
+- 규칙을 말한 뒤 바로 예문 1개로 확인시키고(영어→한국어 해석), 그 예문도 [[PAUSE]]로 따라하기 시키세요.
+  예) "'I'm going to + 동사'는 '곧 ~할 거예요' 하고 마음먹은 계획을 말할 때 써요. I'm going to call him. 곧 그에게 전화할 거예요. 자, 따라 해보세요. [[PAUSE]] 좋아요!"
+
 [★ 상단 텍스트 ★]
 맨 위 [Today's Text] 섹션에 핵심 영어 원문(1~3문장)을 적고, 핵심 표현은 :red[핵심 표현] 형태로 컬러 처리.
 
@@ -433,8 +442,9 @@ def generate_radio_script(fmt_key, news_content, review_str="", yesterday_str=""
 1. 📝 [Today's Text] (핵심 표현 컬러)
 2. ✨ 오프닝 + (어제 복습이 있으면 먼저) + 지난 족보 예문 복습 & 끊어 읽기 따라하기
 3. 🎯 코너 본문 + 핵심 표현 끊어 읽기 따라하기
-4. 📐 0.5초 영작 챌린지 (한국어 문장 주고 영작 유도 → [[PAUSE:4]] → 정답/해석)
-5. 🗂️ 오늘의 노트 & 클로징
+4. 🧩 오늘의 문법 한 입 (위 지침대로 쉽게 1개)
+5. 📐 0.5초 영작 챌린지 (한국어 문장 주고 영작 유도 → [[PAUSE:4]] → 정답/해석)
+6. 🗂️ 오늘의 노트 & 클로징
 
 [★ 클로징 단어 정리 — 한글 발음 음 달기 ★]
 마지막에 오늘의 핵심 단어 3개를 정리할 때, 각 단어에 한글 발음을 괄호로 달아 주세요.
@@ -662,7 +672,6 @@ with tab_radio:
     st.subheader("🎚️ 오늘 어떤 방송 들을까요?")
     mode = st.radio("코너 선택", ["🎲 랜덤 (오늘의 깜짝 코너)"] + [v["label"] for v in FORMATS.values()],
                     label_visibility="collapsed")
-    compact = st.toggle("⚡ 5분 압축 모드 — 핵심 표현만 짧게 (바쁜 날 추천)")
 
     if st.button("▶️ 오늘 자 방송 듣기", use_container_width=True, type="primary"):
         fmt_key = random.choice(list(FORMATS.keys())) if mode.startswith("🎲") else next(k for k, v in FORMATS.items() if v["label"] == mode)
@@ -679,7 +688,7 @@ with tab_radio:
         review_str = ", ".join(f"'{it[2]}'({it[3]})" for it in due_pick)
         with st.spinner("🎙️ 선생님이 원고를 톡톡 튀게 쓰는 중..."):
             script_raw = parse_and_update_storage(
-                generate_radio_script(fmt_key, news_content, review_str, yesterday_str, compact))
+                generate_radio_script(fmt_key, news_content, review_str, yesterday_str))
         with st.spinner("🎵 밝고 따뜻한 목소리로 녹음 중..."):
             audio = text_to_speech(script_raw)
         script_display = strip_pause_markers(script_raw)
