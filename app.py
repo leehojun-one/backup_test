@@ -7,6 +7,9 @@ import os
 import io
 import re
 import base64
+import shutil
+import subprocess
+import tempfile
 from datetime import date, datetime, timedelta
 from openai import OpenAI
 
@@ -526,6 +529,36 @@ def _auto_pause_seconds(seg):
     n = len(re.findall(r"[A-Za-z']+", seg))
     return max(2.5, min(8.0, n * 0.55 + 1.6))
 
+HAS_FFMPEG = shutil.which("ffmpeg") is not None
+
+def _ffmpeg_join(segments):
+    """mp3 조각들을 디코드 후 단일 스트림으로 재인코딩 → 경계 잘림 제거."""
+    with tempfile.TemporaryDirectory() as td:
+        listfile = os.path.join(td, "list.txt")
+        with open(listfile, "w") as lf:
+            for idx, s in enumerate(segments):
+                p = os.path.join(td, f"{idx}.mp3")
+                with open(p, "wb") as f:
+                    f.write(s)
+                lf.write(f"file '{p}'\n")
+        out = os.path.join(td, "out.mp3")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listfile,
+             "-c:a", "libmp3lame", "-ar", "24000", "-ac", "1", "-b:a", "64k", out],
+            check=True, capture_output=True,
+        )
+        with open(out, "rb") as f:
+            return f.read()
+
+def _join_audio(segments):
+    segs = [s for s in segments if s]
+    if HAS_FFMPEG and len(segs) > 1:
+        try:
+            return _ffmpeg_join(segs)
+        except Exception:
+            pass
+    return b"".join(segs)
+
 def text_to_speech(text, voice=None):
     voice = voice or st.session_state['voice']
 
@@ -544,20 +577,19 @@ def text_to_speech(text, voice=None):
 
     # [[PAUSE]] 또는 [[PAUSE:3]] 마커 → 실제 무음 구간 삽입
     parts = re.split(r"\[\[PAUSE(?::(\d+(?:\.\d+)?))?\]\]", text)
-    audio = SILENCE_05   # 리드인 무음: 플레이어가 첫 문장을 놓치지 않게
+    segments = [SILENCE_05]   # 리드인 무음: 첫 음절 보호
     i = 0
     while i < len(parts):
         seg = parts[i]
         if seg and seg.strip():
-            audio += _tts_one(seg)
+            segments.append(_tts_one(seg))
         if i + 1 < len(parts):                 # 다음 원소는 캡처된 초(또는 None)
             dur = parts[i + 1]
-            # 숫자 지정이 있으면 그대로, 없으면 직전 문장 길이에 맞춰 자동 조절
             seconds = float(dur) if dur else _auto_pause_seconds(seg or "")
             reps = max(1, round(seconds / 0.5))
-            audio += SILENCE_05 * reps
+            segments.append(SILENCE_05 * reps)
         i += 2
-    return audio
+    return _join_audio(segments)
 
 # ──────────────────────────────────────────────
 # 8. UI
