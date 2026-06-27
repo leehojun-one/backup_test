@@ -6,10 +6,7 @@ import json
 import os
 import io
 import re
-import base64
-import shutil
-import subprocess
-import tempfile
+import wave
 from datetime import date, datetime, timedelta
 from openai import OpenAI
 
@@ -35,11 +32,6 @@ VOICE_INSTRUCTIONS = (
     "articulate each word clearly so it is easy to repeat."
 )
 
-# 0.5초 무음 mp3 (24kHz mono) — '따라 해보세요' 뒤 실제 쉼 구간용
-SILENCE_05_B64 = (
-    "//NExAAAAANIAAAAAExBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExFMAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKYAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMu//NExKwAAANIAAAAADEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//NExKwAAANIAAAAAFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//NExKwAAANIAAAAAFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV"
-)
-SILENCE_05 = base64.b64decode(SILENCE_05_B64)
 
 # 추천 보이스 (발랄 여성 톤 우선)
 VOICE_OPTIONS = {
@@ -164,11 +156,11 @@ def _write_index(lib):
 def save_broadcast(script, audio_bytes, theme):
     try:
         bid = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"영라디오_{bid}.mp3"
+        fname = f"영라디오_{bid}.wav"
         entry = {"id": bid, "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
                  "theme": theme, "script": script, "audio": fname}
         if DRIVE:
-            entry["drive_file_id"] = drive_upload(fname, audio_bytes, "audio/mpeg")
+            entry["drive_file_id"] = drive_upload(fname, audio_bytes, "audio/wav")
         else:
             os.makedirs(LIB_DIR, exist_ok=True)
             with open(os.path.join(LIB_DIR, fname), "wb") as f:
@@ -539,67 +531,55 @@ def _auto_pause_seconds(seg):
     n = len(re.findall(r"[A-Za-z']+", seg))
     return max(2.5, min(8.0, n * 0.55 + 1.6))
 
-HAS_FFMPEG = shutil.which("ffmpeg") is not None
-
-def _ffmpeg_join(segments):
-    """mp3 조각들을 디코드 후 단일 스트림으로 재인코딩 → 경계 잘림 제거."""
-    with tempfile.TemporaryDirectory() as td:
-        listfile = os.path.join(td, "list.txt")
-        with open(listfile, "w") as lf:
-            for idx, s in enumerate(segments):
-                p = os.path.join(td, f"{idx}.mp3")
-                with open(p, "wb") as f:
-                    f.write(s)
-                lf.write(f"file '{p}'\n")
-        out = os.path.join(td, "out.mp3")
-        subprocess.run(
-            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listfile,
-             "-c:a", "libmp3lame", "-ar", "24000", "-ac", "1", "-b:a", "64k", out],
-            check=True, capture_output=True,
-        )
-        with open(out, "rb") as f:
-            return f.read()
-
-def _join_audio(segments):
-    segs = [s for s in segments if s]
-    if HAS_FFMPEG and len(segs) > 1:
-        try:
-            return _ffmpeg_join(segs)
-        except Exception:
-            pass
-    return b"".join(segs)
-
 def text_to_speech(text, voice=None):
+    """TTS를 무압축 wav(PCM)로 받아 샘플 단위로 정확히 이어붙임 → 경계 잘림 없음, ffmpeg 불필요."""
     voice = voice or st.session_state['voice']
+    fmt = {"rate": 24000, "width": 2, "ch": 1, "set": False}  # OpenAI TTS wav 기본값
 
-    def _tts_one(seg):
+    def _tts_frames(seg):
         out = b""
         for chunk in _chunk_text(seg):
             if not chunk.strip():
                 continue
             try:
                 resp = client.audio.speech.create(model="gpt-4o-mini-tts", voice=voice,
-                                                   input=chunk, instructions=VOICE_INSTRUCTIONS)
+                                                   input=chunk, instructions=VOICE_INSTRUCTIONS,
+                                                   response_format="wav")
             except Exception:
-                resp = client.audio.speech.create(model="tts-1", voice="nova", input=chunk)
-            out += resp.content
+                resp = client.audio.speech.create(model="tts-1", voice="nova",
+                                                   input=chunk, response_format="wav")
+            with wave.open(io.BytesIO(resp.content), "rb") as w:
+                if not fmt["set"]:
+                    fmt["rate"], fmt["width"], fmt["ch"] = w.getframerate(), w.getsampwidth(), w.getnchannels()
+                    fmt["set"] = True
+                out += w.readframes(w.getnframes())
         return out
 
-    # [[PAUSE]] 또는 [[PAUSE:3]] 마커 → 실제 무음 구간 삽입
+    def _silence(seconds):
+        n = int(fmt["rate"] * seconds)
+        return b"\x00" * (n * fmt["width"] * fmt["ch"])
+
     parts = re.split(r"\[\[PAUSE(?::(\d+(?:\.\d+)?))?\]\]", text)
-    segments = [SILENCE_05]   # 리드인 무음: 첫 음절 보호
+    frames = b""
     i = 0
     while i < len(parts):
         seg = parts[i]
         if seg and seg.strip():
-            segments.append(_tts_one(seg))
-        if i + 1 < len(parts):                 # 다음 원소는 캡처된 초(또는 None)
+            frames += _tts_frames(seg)
+        if i + 1 < len(parts):
             dur = parts[i + 1]
             seconds = float(dur) if dur else _auto_pause_seconds(seg or "")
-            reps = max(1, round(seconds / 0.5))
-            segments.append(SILENCE_05 * reps)
+            frames += _silence(seconds)
         i += 2
-    return _join_audio(segments)
+
+    # 맨 앞 리드인 0.25초
+    frames = _silence(0.25) + frames
+
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(fmt["ch"]); w.setsampwidth(fmt["width"]); w.setframerate(fmt["rate"])
+        w.writeframes(frames)
+    return out.getvalue()
 
 # ──────────────────────────────────────────────
 # 8. UI
@@ -631,7 +611,7 @@ with st.sidebar:
                       "함께라면 영어, 정말 쉬워질 거예요!")
             st.session_state['voice_sample'] = text_to_speech(sample, voice=sel)
     if 'voice_sample' in st.session_state:
-        st.audio(st.session_state['voice_sample'], format="audio/mp3")
+        st.audio(st.session_state['voice_sample'], format="audio/wav")
     st.caption("💡 더 많은 목소리는 openai.fm 에서도 들어볼 수 있어요.")
     st.divider()
 
@@ -659,7 +639,7 @@ with st.sidebar:
 # 즉석 레슨 (공통 — 어느 탭에서든 표시)
 if 'instant_lesson' in st.session_state:
     st.success(f"🎯 원포인트 레슨: [{st.session_state['lesson_title']}]")
-    st.audio(st.session_state['instant_audio'], format="audio/mp3")
+    st.audio(st.session_state['instant_audio'], format="audio/wav")
     st.info(st.session_state['instant_lesson'])
     if st.button("❌ 레슨 창 닫기"):
         del st.session_state['instant_lesson']; del st.session_state['instant_audio']; st.rerun()
@@ -708,10 +688,10 @@ with tab_radio:
     if st.session_state['current_script']:
         st.success(f"✨ 방송 준비 완료 — {st.session_state['current_theme']}")
         st.markdown("### 🎧 오디오 스트리밍")
-        st.audio(st.session_state['current_audio'], format="audio/mp3")
+        st.audio(st.session_state['current_audio'], format="audio/wav")
         st.download_button("⬇️ 이 방송 폰에 저장 (mp3)", data=st.session_state['current_audio'],
-                           file_name=f"영라디오_{datetime.now().strftime('%m%d_%H%M')}.mp3",
-                           mime="audio/mp3", use_container_width=True)
+                           file_name=f"영라디오_{datetime.now().strftime('%m%d_%H%M')}.wav",
+                           mime="audio/wav", use_container_width=True)
         st.caption("ℹ️ AI 합성 음성입니다." + ("  ·  ☁️ 드라이브 보관함에 자동 저장됐어요." if DRIVE else "  ·  보관함에 자동 저장됐어요."))
         st.markdown("---")
         st.markdown(st.session_state['current_script'])
@@ -784,7 +764,7 @@ with tab_review:
                         with st.spinner("녹음 중..."):
                             st.session_state[f'revbytes_{i}'] = text_to_speech(say)
                     if f'revbytes_{i}' in st.session_state:
-                        st.audio(st.session_state[f'revbytes_{i}'], format="audio/mp3")
+                        st.audio(st.session_state[f'revbytes_{i}'], format="audio/wav")
                 else:
                     st.caption("위 버튼으로 치트키 문장을 먼저 불러오세요.")
                 ca, cb = st.columns(2)
@@ -805,10 +785,10 @@ with tab_lib:
         chosen = library[idx]
         audio_bytes = read_broadcast_audio(chosen)
         if audio_bytes:
-            st.audio(audio_bytes, format="audio/mp3")
+            st.audio(audio_bytes, format="audio/wav")
             a, b = st.columns(2)
             a.download_button("⬇️ 폰에 저장", data=audio_bytes, file_name=chosen["audio"],
-                              mime="audio/mp3", use_container_width=True, key=f"dl_{chosen['id']}")
+                              mime="audio/wav", use_container_width=True, key=f"dl_{chosen['id']}")
             if b.button("🗑️ 삭제", use_container_width=True, key=f"del_{chosen['id']}"):
                 delete_broadcast(chosen); st.rerun()
             with st.expander("📄 대본 보기"):
