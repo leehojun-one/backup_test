@@ -400,7 +400,7 @@ def generate_radio_script(fmt_key, news_content, review_str="", yesterday_str=""
 방송을 시작하면 가장 먼저, 어제 배운 표현들을 60초 안에 빠르게 짚어주세요. 각 표현의 예문 1개와 한국어 해석을 들려주고 짧게 따라하기를 시키세요.
 어제 배운 표현: {yesterday_str}
 """
-    length_rule = "전체 약 1800자 내외, 자연스러운 라디오 멘트체."
+    length_rule = "전체 약 2000~2400자, 자연스러운 라디오 멘트체. 문법 깊이 알기 코너는 충분히 다루되 군더더기 없이."
     system_prompt = f"""
 당신은 아침 영어 라디오를 진행하는, 밝고 따뜻하며 살짝 장난기 있는 20대 후반 한국인 여배우 영어 선생님입니다.
 오늘의 단 한 명의 청취자는 '호준 씨'입니다. 다정하지만 과하지 않은 톤으로, 귀로 듣고 따라 말하며 배우는 라디오를 진행하세요.
@@ -421,11 +421,14 @@ def generate_radio_script(fmt_key, news_content, review_str="", yesterday_str=""
 [★ 지난 족보 복습 — 예문 + 따라하기 ★]
 오프닝에서 과거 족보 패턴({patterns_str}) 또는 단어({words_str}) 중 1~2개를 골라, 각 표현마다 실전 예문 1~2개를 영어로 들려주고 한국어 해석을 붙인 뒤, 위 끊어 읽기 방식으로 따라하기를 시키세요.
 {review_block}
-[★ 오늘의 문법 한 입 (One-point Grammar) ★]
-오늘 다룬 표현이나 예문 중 하나에서 핵심 문법 포인트 1개를 골라, 운전 중에도 귀로 이해되게 아주 쉽고 짧게 설명하세요.
-- 어려운 문법 용어는 최소화하고, "왜 이렇게 쓰는지"를 일상 비유로 풀어주세요.
-- 규칙을 말한 뒤 바로 예문 1개로 확인시키고(영어→한국어 해석), 그 예문도 [[PAUSE]]로 따라하기 시키세요.
-  예) "'I'm going to + 동사'는 '곧 ~할 거예요' 하고 마음먹은 계획을 말할 때 써요. I'm going to call him. 곧 그에게 전화할 거예요. 자, 따라 해보세요. [[PAUSE]] 좋아요!"
+[★ 오늘의 문법 깊이 알기 (Grammar Deep-dive) ★]
+오늘 다룬 표현/예문에서 핵심 문법 포인트 1개를 골라, 단순 규칙을 넘어 '제대로' 이해되도록 설명하세요. (단, 귀로 듣는 방송이니 한 번에 하나씩 명료하게.)
+아래를 순서대로 담으세요:
+1) 핵심 규칙과 형태: 어떤 구조로 만드는지 (예: 'be going to + 동사원형').
+2) 왜 그렇게 쓰는지 (뉘앙스·원리): 일상 비유로 감 잡게.
+3) 헷갈리는 표현과의 차이: 비슷하지만 다른 표현과 비교해 언제 무엇을 쓰는지 (예: be going to vs will, a vs the, some vs any, for vs since 등 그날 주제에 맞는 것 1쌍).
+4) 한국인이 자주 하는 실수 1개와 올바른 교정 (틀린 문장 → 고친 문장).
+5) 응용 예문 2개(영어→한국어 해석). 그중 하나는 호준 씨의 영업/일상 상황으로 만들고, 두 예문 모두 끊어 읽기 + [[PAUSE]]로 따라하기 시키세요.
 
 [★ 상단 텍스트 ★]
 맨 위 [Today's Text] 섹션에 핵심 영어 원문(1~3문장)을 적고, 핵심 표현은 :red[핵심 표현] 형태로 컬러 처리.
@@ -434,7 +437,7 @@ def generate_radio_script(fmt_key, news_content, review_str="", yesterday_str=""
 1. 📝 [Today's Text] (핵심 표현 컬러)
 2. ✨ 오프닝 + (어제 복습이 있으면 먼저) + 지난 족보 예문 복습 & 끊어 읽기 따라하기
 3. 🎯 코너 본문 + 핵심 표현 끊어 읽기 따라하기
-4. 🧩 오늘의 문법 한 입 (위 지침대로 쉽게 1개)
+4. 🧩 오늘의 문법 깊이 알기 (위 5단계 지침대로 충실히)
 5. 📐 0.5초 영작 챌린지 (한국어 문장 주고 영작 유도 → [[PAUSE:4]] → 정답/해석)
 6. 🗂️ 오늘의 노트 & 클로징
 
@@ -516,14 +519,38 @@ def strip_pause_markers(text):
     """화면 표시용: [[PAUSE]] 마커를 보기 좋은 표시로 치환"""
     return re.sub(r"\[\[PAUSE(?::\d+(?:\.\d+)?)?\]\]", " 🔁 *(따라 말해보기)* ", text)
 
-def _chunk_text(text, limit=1600):
+def _chunk_text(text, limit=180):
+    """문장 단위 분할. 영어가 든 문장은 '단독'으로 떼어 TTS 누락을 막고,
+    한국어 설명만 limit 한도로 합쳐 호출 수를 줄인다."""
+    raw = re.split(r'(?<=[\.!?。…?!])\s+|\n+', text)
+    units = []
+    for u in raw:
+        u = u.strip()
+        if not u:
+            continue
+        if len(u) > limit:
+            for part in re.split(r'(?<=[,;:、])\s+', u):
+                part = part.strip()
+                if part:
+                    units.append(part)
+        else:
+            units.append(u)
     chunks, cur = [], ""
-    for line in text.split("\n"):
-        if len(cur) + len(line) + 1 > limit and cur:
-            chunks.append(cur); cur = ""
-        cur += line + "\n"
-    if cur.strip():
-        chunks.append(cur)
+    def _flush():
+        nonlocal cur
+        if cur.strip():
+            chunks.append(cur)
+        cur = ""
+    for u in units:
+        has_eng = bool(re.search(r"[A-Za-z]", u))
+        if has_eng:
+            _flush()
+            chunks.append(u)               # 영어 문장 → 단독 TTS (안 잘림)
+        else:
+            if len(cur) + len(u) + 1 > limit and cur:
+                _flush()
+            cur += (" " if cur else "") + u
+    _flush()
     return chunks
 
 def _auto_pause_seconds(seg):
