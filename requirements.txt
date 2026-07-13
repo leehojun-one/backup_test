@@ -1,5 +1,8 @@
-streamlit>=1.40
-openai>=1.40
-feedparser
-google-api-python-client
+streamlit
+pandas
+matplotlib
+gspread
 google-auth
+Pillow
+openpyxl
+xlrd
