@@ -1,3 +1,5 @@
+import matplotlib
+matplotlib.use('Agg') # 서버 환경 충돌 방지 안전장치
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
